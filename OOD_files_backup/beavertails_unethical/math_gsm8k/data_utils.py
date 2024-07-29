@@ -1,0 +1,1811 @@
+import pandas as pd
+import json
+import pickle
+import numpy as np
+from utils import ROOT_DIR
+from datasets import load_dataset
+from collections import Counter
+from sklearn.model_selection import train_test_split
+import random
+from openpyxl import Workbook, load_workbook
+
+def load_sst2():
+    def process_raw_data_sst(lines):
+        """from lines in dataset to two lists of sentences and labels respectively"""
+        labels = []
+        sentences = []
+        for line in lines:
+            labels.append(int(line[0]))
+            sentences.append(line[2:].strip())
+        return sentences, labels
+
+    with open(f"{ROOT_DIR}/data/sst2/stsa.binary.train", "r") as f:
+        train_lines = f.readlines()
+    with open(f"{ROOT_DIR}/data/sst2/stsa.binary.test", "r") as f:
+        test_lines = f.readlines()
+    with open(f"{ROOT_DIR}/data/sst2/stsa.binary.dev", "r") as f:
+        val_lines = f.readlines()
+    train_sentences, train_labels = process_raw_data_sst(train_lines)
+    test_sentences, test_labels = process_raw_data_sst(test_lines)
+    val_sentences, val_labels = process_raw_data_sst(val_lines)
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def load_beavertails_unethical_OOD_gsm8k():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    # Load the training dataset
+    train_data = load_dataset('PKU-Alignment/BeaverTails', split='330k_train')
+    test_data = load_dataset('PKU-Alignment/BeaverTails', split='330k_test')
+
+    train_prompts = train_data['prompt']
+    train_categories = train_data['category']
+    train_is_safe = train_data['is_safe']
+    test_prompts = test_data['prompt']
+    test_categories = test_data['category']
+    test_is_safe = test_data['is_safe']
+
+    # Extract prompts with "discrimination, stereotype, and injustice" category as True
+    train_filtered_prompts = [train_prompts[i] for i in range(len(train_categories)) if train_categories[i]['non_violent_unethical_behavior']]
+    train_filtered_labels = [1] * len(train_filtered_prompts)
+    train_safe_prompts = [train_prompts[i] for i in range(len(train_prompts)) if train_is_safe[i]]
+    train_safe_labels = [0] * len(train_safe_prompts)
+    train_sentences = train_filtered_prompts + train_safe_prompts
+    train_labels = train_filtered_labels + train_safe_labels
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 17600)
+
+    val_indices = random.sample(range(len(train_sentences)), 2600)
+    val_sentences = [train_sentences[idx] for idx in val_indices]
+    val_labels = [train_labels[idx] for idx in val_indices]
+
+    train_sentences = [sample for i, sample in enumerate(train_sentences) if i not in val_indices]
+    train_labels = [label for i, label in enumerate(train_labels) if i not in val_indices]
+
+    test_filtered_prompts = [test_prompts[i] for i in range(len(test_categories)) if test_categories[i]['non_violent_unethical_behavior']]
+    test_filtered_labels = [1] * len(test_filtered_prompts)
+    test_safe_prompts = [test_prompts[i] for i in range(len(test_prompts)) if test_is_safe[i]]
+    test_safe_labels = [0] * len(test_safe_prompts)
+    test_sentences = test_filtered_prompts + test_safe_prompts
+    test_labels = test_filtered_labels + test_safe_labels
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 2600)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique IID val labels', {num: val_labels.count(num) for num in val_labels})
+    
+    ###Load generated-OOD dataset
+    OOD_dataset = load_dataset("openai/gsm8k", 'main')
+    # OOD_train_sentences = OOD_dataset['train']['question']
+    # OOD_train_labels = OOD_dataset['train']['answer']
+    OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_math_augmented.xlsx")
+    OOD_train_sentences = OOD_train_sentences[1:]
+
+    OOD_test_sentences = OOD_dataset['test']['question']
+    # OOD_test_labels = OOD_dataset['test']['answer']
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+
+    sample_size = 1300
+    OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    for item in OOD_val_sentences:
+        OOD_train_sentences.remove(item)
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+
+    print('\n\n OOD_train_sentences', len(OOD_train_sentences))
+    # print('OOD_train_sentences', OOD_train_sentences[0:5])
+    # print('OOD_train_labels', len(OOD_train_labels))
+    
+    # print('\n OOD_test_sentences', len(OOD_test_sentences))
+    # print('\n OOD_test_labels', len(OOD_test_labels))
+    # print('\n OOD_val_sentences', len(OOD_val_sentences))
+    # print('\n OOD_val_labels', len(OOD_val_labels))
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('\n\ntrain_labels', set(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('\n\test_labels', test_labels[0:5])
+    # print('val_labels', len(val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_beavertails_unethical_OOD_mbpp():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    # Load the training dataset
+    train_data = load_dataset('PKU-Alignment/BeaverTails', split='330k_train')
+    test_data = load_dataset('PKU-Alignment/BeaverTails', split='330k_test')
+
+    train_prompts = train_data['prompt']
+    train_categories = train_data['category']
+    train_is_safe = train_data['is_safe']
+    test_prompts = test_data['prompt']
+    test_categories = test_data['category']
+    test_is_safe = test_data['is_safe']
+
+    # Extract prompts with "discrimination, stereotype, and injustice" category as True
+    train_filtered_prompts = [train_prompts[i] for i in range(len(train_categories)) if train_categories[i]['non_violent_unethical_behavior']]
+    train_filtered_labels = [1] * len(train_filtered_prompts)
+    train_safe_prompts = [train_prompts[i] for i in range(len(train_prompts)) if train_is_safe[i]]
+    train_safe_labels = [0] * len(train_safe_prompts)
+    train_sentences = train_filtered_prompts + train_safe_prompts
+    train_labels = train_filtered_labels + train_safe_labels
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    #for synthetic
+    # train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 17600)
+    ## for orig
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 6400)
+
+
+    #for synthetic
+    # val_indices = random.sample(range(len(train_sentences)), 2600)
+    #for orig
+    val_indices = random.sample(range(len(train_sentences)), 900)
+    val_sentences = [train_sentences[idx] for idx in val_indices]
+    val_labels = [train_labels[idx] for idx in val_indices]
+
+    train_sentences = [sample for i, sample in enumerate(train_sentences) if i not in val_indices]
+    train_labels = [label for i, label in enumerate(train_labels) if i not in val_indices]
+
+    test_filtered_prompts = [test_prompts[i] for i in range(len(test_categories)) if test_categories[i]['non_violent_unethical_behavior']]
+    test_filtered_labels = [1] * len(test_filtered_prompts)
+    test_safe_prompts = [test_prompts[i] for i in range(len(test_prompts)) if test_is_safe[i]]
+    test_safe_labels = [0] * len(test_safe_prompts)
+    test_sentences = test_filtered_prompts + test_safe_prompts
+    test_labels = test_filtered_labels + test_safe_labels
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 1000)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique IID val labels', {num: val_labels.count(num) for num in val_labels})
+    
+    ###Load generated-OOD dataset
+    OOD_dataset = load_dataset("google-research-datasets/mbpp")
+    OOD_train_sentences = OOD_dataset['train']['text']
+    # OOD_train_labels = OOD_dataset['train']['answer']
+    # OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_code_augmented.xlsx")
+    # OOD_train_sentences = OOD_train_sentences[1:]
+
+    OOD_test_sentences = OOD_dataset['test']['text']
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+
+    OOD_val_sentences = OOD_dataset['validation']['text']
+
+    # sample_size = 1300
+    # OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    # for item in OOD_val_sentences:
+    #     OOD_train_sentences.remove(item)
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+
+    print('\n\nOOD_train_sentences', len(OOD_train_sentences))
+    print('OOD_train_labels', len(OOD_train_labels))
+    print('OOD_test_sentences', len(OOD_test_sentences))
+    print('OOD_test_labels', len(OOD_test_labels))
+    print('OOD_val_sentences', len(OOD_val_sentences))
+    print('OOD_val_labels', len(OOD_val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def load_civil_comments_toxicity():
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.6 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['toxicity'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+
+    test_labels =  convert_labels(dataset['test']['toxicity'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+
+    val_labels =  convert_labels(dataset['validation']['toxicity'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def read_excel_file(file_path):
+    strings_list = []
+    try:
+        # Load the workbook
+        workbook = load_workbook(file_path)
+        # Select the first sheet
+        sheet = workbook.active
+        # Iterate over rows in the first column and append strings to the list
+        for row in sheet.iter_rows(min_row=1, max_col=1, max_row=sheet.max_row, values_only=True):
+            if row[0]:
+                strings_list.append(row[0])
+    except Exception as e:
+        print("An error occurred:", e)
+    return strings_list
+
+
+def load_civil_comments_toxicity_OOD_gsm8k():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+        
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.6 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['toxicity'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 15000)
+
+    test_labels =  convert_labels(dataset['test']['toxicity'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 2600)
+    
+    val_labels =  convert_labels(dataset['validation']['toxicity'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+    val_sentences, val_labels = generate_random_data(val_sentences, val_labels, 2600)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+
+    ###Load generated-OOD dataset
+    OOD_dataset = load_dataset("openai/gsm8k", 'main')
+    OOD_train_sentences = OOD_dataset['train']['question']
+    # OOD_train_labels = OOD_dataset['train']['answer']
+    # OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_math_augmented.xlsx")
+    # OOD_train_sentences = OOD_train_sentences[1:]
+
+    OOD_test_sentences = OOD_dataset['test']['question']
+    # OOD_test_labels = OOD_dataset['test']['answer']
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+
+    sample_size = min(len(OOD_train_sentences) // 2, 1300)
+    OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    for item in OOD_val_sentences:
+        OOD_train_sentences.remove(item)
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+
+    print('\n\n OOD_train_sentences', len(OOD_train_sentences))
+    # print('OOD_train_sentences', OOD_train_sentences[0:5])
+    # print('OOD_train_labels', len(OOD_train_labels))
+    
+    # print('\n OOD_test_sentences', len(OOD_test_sentences))
+    # print('\n OOD_test_labels', len(OOD_test_labels))
+    # print('\n OOD_val_sentences', len(OOD_val_sentences))
+    # print('\n OOD_val_labels', len(OOD_val_labels))
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('\n\ntrain_labels', set(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('\n\test_labels', test_labels[0:5])
+    # print('val_labels', len(val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_civil_comments_toxicity_OOD_mbpp():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+        
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.6 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['toxicity'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    # train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 15000)
+    ##for orig
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 800)
+
+    test_labels =  convert_labels(dataset['test']['toxicity'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 1000)
+    
+    val_labels =  convert_labels(dataset['validation']['toxicity'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+    # val_sentences, val_labels = generate_random_data(val_sentences, val_labels, 2600)
+    #for orig
+    val_sentences, val_labels = generate_random_data(val_sentences, val_labels, 200)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+
+    ###Load generated-OOD dataset
+    OOD_dataset = load_dataset("google-research-datasets/mbpp")
+    OOD_train_sentences = OOD_dataset['train']['text']
+    # OOD_train_labels = OOD_dataset['train']['answer']
+    # OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_code_augmented.xlsx")
+    # OOD_train_sentences = OOD_train_sentences[1:]
+
+    OOD_test_sentences = OOD_dataset['test']['text']
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+
+    OOD_val_sentences = OOD_dataset['validation']['text']
+
+    # sample_size = 1300
+    # OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    # for item in OOD_val_sentences:
+    #     OOD_train_sentences.remove(item)
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+
+    print('\n\nOOD_train_sentences', len(OOD_train_sentences))
+    print('OOD_train_labels', len(OOD_train_labels))
+    print('OOD_test_sentences', len(OOD_test_sentences))
+    print('OOD_test_labels', len(OOD_test_labels))
+    print('OOD_val_sentences', len(OOD_val_sentences))
+    print('OOD_val_labels', len(OOD_val_labels))
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('\n\ntrain_labels', set(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('\n\test_labels', test_labels[0:5])
+    # print('val_labels', len(val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def load_civil_comments_toxicity_OOD_sst2():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+        
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.6 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['toxicity'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 15000)
+
+    test_labels =  convert_labels(dataset['test']['toxicity'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 3650)
+    
+    val_labels =  convert_labels(dataset['validation']['toxicity'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+    val_sentences, val_labels = generate_random_data(val_sentences, val_labels, 1800)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+
+    ###Load generated-OOD dataset
+    # OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_sst2_augmented.xlsx")
+    # OOD_train_sentences = OOD_train_sentences[1:]
+    # OOD_train_sentences = [review for review in OOD_train_sentences if len(review) >= 15]
+
+    OOD_train_sentences, OOD_train_labels, OOD_test_sentences, OOD_test_labels, OOD_val_sentences, OOD_val_labels= load_sst2()
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    
+    # sample_size = min(len(OOD_train_sentences) // 2, 1300)
+    # OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    # OOD_val_labels = [2] * len(OOD_val_sentences)
+    # for item in OOD_val_sentences:
+    #     OOD_train_sentences.remove(item)
+    
+
+    print('\nOOD_train_sentences2', len(OOD_train_sentences))
+    # print('OOD_train_sentences', OOD_train_sentences[0:5])
+    # print('OOD_train_labels', len(OOD_train_labels))
+    
+    # print('\n OOD_test_sentences', len(OOD_test_sentences))
+    # print('\n OOD_test_labels', len(OOD_test_labels))
+    # print('\n OOD_val_sentences', len(OOD_val_sentences))
+    # print('\n OOD_val_labels', len(OOD_val_labels))
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('\n\ntrain_labels', set(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('\n\test_labels', test_labels[0:5])
+    # print('val_labels', len(val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_civil_comments_toxicity_OOD_toxigen():
+
+    def generate_random_data(samples, labels, num_samples):
+        # Create a permutation
+        permutation = list(range(len(samples)))
+        random.shuffle(permutation)
+        
+        # Select samples and labels based on the permutation and num_samples
+        random_samples = [samples[i] for i in permutation[:num_samples]]
+        random_labels = [labels[i] for i in permutation[:num_samples]]
+        return random_samples, random_labels
+        
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.6 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['toxicity'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+    train_sentences, train_labels = generate_random_data(train_sentences, train_labels, 14000)
+
+    test_labels =  convert_labels(dataset['test']['toxicity'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+    test_sentences, test_labels = generate_random_data(test_sentences, test_labels, 1900)
+    
+    val_labels =  convert_labels(dataset['validation']['toxicity'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+    val_sentences, val_labels = generate_random_data(val_sentences, val_labels, 4000)
+
+    print('\n\ntrain_labels_IID', len(train_labels))
+    print('test_labels_IID', test_labels[0:10])
+    print('Unique IID test labels', {num: test_labels.count(num) for num in test_labels})
+    print('test_labels_IID', len(test_labels))
+    print('val_labels_IID', len(val_labels))
+
+    ###Load generated-OOD dataset
+    OOD_dataset = load_dataset("toxigen/toxigen-data", name="annotated", use_auth_token=True)
+    OOD_train_sentences = OOD_dataset['train']['text']
+    OOD_test_sentences = OOD_dataset['test']['text']
+    
+    sample_size = 2000
+    OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    for item in OOD_val_sentences:
+        OOD_train_sentences.remove(item)
+
+    # OOD_train_sentences = read_excel_file("data/data_ethical/OOD_samples_llama-3-70b-instruct_toxigen_augmented.xlsx")
+    # OOD_train_sentences = OOD_train_sentences[1:]
+
+    OOD_train_labels = [2] * len(OOD_train_sentences)
+    OOD_test_labels = [2] * len(OOD_test_sentences)
+    OOD_val_labels = [2] * len(OOD_val_sentences)
+    
+    # sample_size = min(len(OOD_train_sentences) // 2, 1300)
+    # OOD_val_sentences = random.sample(OOD_train_sentences, sample_size)
+    # OOD_val_labels = [2] * len(OOD_val_sentences)
+    # for item in OOD_val_sentences:
+    #     OOD_train_sentences.remove(item)
+    
+
+    print('\nOOD_train_sentences', len(OOD_train_sentences))
+    print('OOD_test_sentences', len(OOD_test_sentences))
+    print('OOD_test_labels', len(OOD_test_labels))
+    print('OOD_val_sentences', len(OOD_val_sentences))
+    print('OOD_val_labels', len(OOD_val_labels))
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('\n\ntrain_labels', set(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('\n\test_labels', test_labels[0:5])
+    # print('val_labels', len(val_labels))
+
+    ###Merge IID+generated-OOD dataset
+    train_sentences.extend(OOD_train_sentences)
+    train_labels.extend(OOD_train_labels)
+    test_sentences.extend(OOD_test_sentences)
+    test_labels.extend(OOD_test_labels)
+    # test_sentences = OOD_test_sentences
+    # test_labels= OOD_test_labels
+    val_sentences.extend(OOD_val_sentences)
+    val_labels.extend(OOD_val_labels)
+    
+    print('\n\ntrain_labels_IID+OOD', len(train_labels))
+    print('Unique train labels', {num: train_labels.count(num) for num in train_labels})
+    print('Unique test labels', {num: test_labels.count(num) for num in test_labels})
+    print('Unique val labels', {num: val_labels.count(num) for num in val_labels})
+    print('test_labels', len(test_labels))
+    print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_civil_comments_obscene():
+    def convert_labels(labels):
+    # return [1 if label > 0.6 else 0 if 0.1 <= label <= 0.4 else None for label in labels if label is not None]
+        return [1 if label > 0.4 else 0 if label == 0.0 else None for label in labels if label is not None]
+
+    def get_training_samples(samples, labels):
+        return [sample for sample, label in zip(samples, labels) if label is not None]
+
+
+    def balance_binary_classes(samples, labels):
+        class_0_samples = [sample for sample, label in zip(samples, labels) if label == 0]
+        class_1_samples = [sample for sample, label in zip(samples, labels) if label == 1]
+        
+        min_samples = min(len(class_0_samples), len(class_1_samples))
+        
+        balanced_samples = class_0_samples[:min_samples] + class_1_samples[:min_samples]
+        balanced_labels = [0] * min_samples + [1] * min_samples
+        
+        return balanced_samples, balanced_labels
+
+    dataset = load_dataset("google/civil_comments")
+
+    train_labels =  convert_labels(dataset['train']['obscene'])
+    train_sentences = get_training_samples(dataset['train']['text'], train_labels)
+    train_labels = [entry for entry in train_labels if entry is not None]
+    train_sentences, train_labels = balance_binary_classes(train_sentences, train_labels)
+
+    test_labels =  convert_labels(dataset['test']['obscene'])
+    test_sentences = get_training_samples(dataset['test']['text'], test_labels)
+    test_labels = [entry for entry in test_labels if entry is not None]
+    test_sentences, test_labels = balance_binary_classes(test_sentences, test_labels)
+
+    val_labels =  convert_labels(dataset['validation']['obscene'])
+    val_sentences = get_training_samples(dataset['validation']['text'], val_labels)
+    val_labels = [entry for entry in val_labels if entry is not None]
+    val_sentences, val_labels = balance_binary_classes(val_sentences, val_labels)
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('val_labels', len(val_labels))
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def load_align_ethical():
+    df_annotation = pd.read_csv("data/data_ethical/ethical_inspector_data_8k.csv", delimiter=',')
+    df_annotation = df_annotation.dropna()
+
+    # df_annotation['label'].value_counts()
+    possible_labels = df_annotation.label.unique()
+    label_dict = {}
+    for index, possible_label in enumerate(possible_labels):
+        label_dict[possible_label] = index
+
+    df_annotation['name_label'] = df_annotation['label']
+    df_annotation['label'] = df_annotation.label.replace(label_dict)
+
+    X, X_test, y, y_test = train_test_split(df_annotation.index.values,
+                                            df_annotation.label.values,
+                                            test_size=0.2,
+                                            random_state=42,
+                                            stratify=df_annotation.label.values)
+
+    X_train, X_val, y_train, y_val = train_test_split(X,
+                                                      y,
+                                                      test_size=0.2,
+                                                      random_state=42)
+
+    df_annotation['data_type'] = ['not_set'] * df_annotation.shape[0]
+
+    df_annotation.loc[X_train, 'data_type'] = 'train'
+    df_annotation.loc[X_val, 'data_type'] = 'val'
+    df_annotation.loc[X_test, 'data_type'] = 'test'
+
+    train_sentences = df_annotation[df_annotation.data_type == 'train']['text'].tolist()
+    train_labels = df_annotation[df_annotation.data_type == 'train'].label.values
+
+    test_sentences = df_annotation[df_annotation.data_type == 'test']['text'].tolist()
+    test_labels = df_annotation[df_annotation.data_type == 'test'].label.values
+
+    val_sentences = df_annotation[df_annotation.data_type == 'val']['text'].tolist()
+    val_labels = df_annotation[df_annotation.data_type == 'val'].label.values
+
+    # print('\n\ntrain_labels', len(train_labels))
+    # print('test_labels', len(test_labels))
+    # print('val_labels', len(val_labels))
+
+    # print('\n\ntest_sentences: ', test_sentences[0:5])
+    # print('\ntest_labels: ', test_labels[0:5])
+    # print('\ntest_sentences: ', len(test_sentences))
+    # print('\ntest_labels: ', len(test_labels))
+
+    # print('\n\ndf_annotation: ', df_annotation[df_annotation.data_type == 'train'][0:5])
+    # print('\n\ndf_annotation text: ', df_annotation[df_annotation.data_type == 'train']['text'][0:5].tolist())
+    # print('\ndf_annotation labels: ', df_annotation[df_annotation.data_type == 'train'].label.values[0:5])
+    # print('\ndf_annotation: ', len(df_annotation[df_annotation.data_type=='train']))
+    # print('df_annotation labels: ', len(df_annotation[df_annotation.data_type == 'train'].label.values))
+
+    # print('\n\ntest_df_annotation: ', df_annotation[df_annotation.data_type == 'test'][0:5])
+    # print('\ntest_df_annotation labels: ', df_annotation[df_annotation.data_type == 'test'].label.values[0:5])
+    # print('\ntest_df_annotation: ', len(df_annotation[df_annotation.data_type == 'test']))
+    # print('test_df_annotation labels: ', len(df_annotation[df_annotation.data_type == 'test'].label.values))
+
+    # train_data = pd.read_csv(f'{ROOT_DIR}/data/data_ethical/train_subset.csv')
+    # test_data = pd.read_csv(f'{ROOT_DIR}/data/data_ethical/test.csv')
+    # val_data = pd.read_csv(f'{ROOT_DIR}/data/data_ethical/val.csv')
+    #
+    # train_sentences = train_data['Text']
+    # train_sentences = list([item.replace('""', '"') for item in train_sentences])
+    # train_labels = list(train_data['Class'])
+    #
+    # test_sentences = test_data['Text']
+    # test_sentences = list([item.replace('""', '"') for item in test_sentences])
+    # test_labels = list(test_data['Class'])
+    #
+    # val_sentences = val_data['Text']
+    # val_sentences = list([item.replace('""', '"') for item in val_sentences])
+    # val_labels = list(val_data['Class'])
+    #
+    # train_labels = [l - 1 for l in train_labels]  # make them 0, 1, 2, 3 instead of 1, 2, 3, 4...
+    # test_labels = [l - 1 for l in test_labels]
+    # val_labels = [l - 1 for l in val_labels]
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+def load_agnews():
+    train_data = pd.read_csv(f'{ROOT_DIR}/data/agnews/train.csv')
+    test_data = pd.read_csv(f'{ROOT_DIR}/data/agnews/test.csv')
+    val_data = pd.read_csv(f'{ROOT_DIR}/data/agnews/val.csv')
+
+    train_sentences = train_data['Title'] + ". " + train_data['Description']
+    train_sentences = list(
+        [item.replace(' #39;s', '\'s').replace(' quot;', "\"").replace('\\', " ").replace(' #39;ll', "'ll") for item
+         in train_sentences])  # some basic cleaning
+    train_labels = list(train_data['Class Index'])
+
+    test_sentences = test_data['Title'] + ". " + test_data['Description']
+    test_sentences = list(
+        [item.replace(' #39;s', '\'s').replace(' quot;', "\"").replace('\\', " ").replace(' #39;ll', "'ll") for item
+         in test_sentences])  # some basic cleaning
+    test_labels = list(test_data['Class Index'])
+
+    val_sentences = val_data['Title'] + ". " + val_data['Description']
+    val_sentences = list(
+        [item.replace(' #39;s', '\'s').replace(' quot;', "\"").replace('\\', " ").replace(' #39;ll', "'ll") for item
+         in val_sentences])  # some basic cleaning
+    val_labels = list(val_data['Class Index'])
+
+    train_labels = [l - 1 for l in train_labels]  # make them 0, 1, 2, 3 instead of 1, 2, 3, 4
+    test_labels = [l - 1 for l in test_labels]
+    val_labels = [l - 1 for l in val_labels]
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_trec():
+    inv_label_dict = {'NUM': 0, 'LOC': 1, 'HUM': 2, 'DESC': 3, 'ENTY': 4, 'ABBR': 5}
+    train_sentences = []
+    train_labels = []
+    with open(f'{ROOT_DIR}/data/trec/train.txt', 'r') as train_data:
+        for line in train_data:
+            train_label = line.split(' ')[0].split(':')[0]
+            train_label = inv_label_dict[train_label]
+            train_sentence = ' '.join(line.split(' ')[1:]).strip()
+            # basic cleaning
+            train_sentence = train_sentence.replace(" 's", "'s").replace('`` ', '"').replace(" ''", '"').replace(' ?',
+                                                                                                                 '?').replace(
+                ' ,', ',')
+            train_labels.append(train_label)
+            train_sentences.append(train_sentence)
+
+    test_sentences = []
+    test_labels = []
+    with open(f'{ROOT_DIR}/data/trec/test.txt', 'r') as test_data:
+        for line in test_data:
+            test_label = line.split(' ')[0].split(':')[0]
+            test_label = inv_label_dict[test_label]
+            test_sentence = ' '.join(line.split(' ')[1:]).strip()
+            test_sentence = test_sentence.replace(" 's", "'s").replace('`` ', '"').replace(" ''", '"').replace(' ?',
+                                                                                                               '?').replace(
+                ' ,', ',')
+            test_labels.append(test_label)
+            test_sentences.append(test_sentence)
+
+    val_sentences = []
+    val_labels = []
+    with open(f'{ROOT_DIR}/data/trec/validation.txt', 'r') as val_data:
+        for line in val_data:
+            val_label = line.split(' ')[0].split(':')[0]
+            val_label = inv_label_dict[val_label]
+            val_sentence = ' '.join(line.split(' ')[1:]).strip()
+            val_sentence = val_sentence.replace(" 's", "'s").replace('`` ', '"').replace(" ''", '"').replace(' ?',
+                                                                                                             '?').replace(
+                ' ,', ',')
+            val_labels.append(val_label)
+            val_sentences.append(val_sentence)
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_subj():
+    train_sentences = []
+    train_labels = []
+    with open(f"{ROOT_DIR}/data/subj/train.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'objective':
+                train_labels.append(0)
+            elif curr_label == 'subjective':
+                train_labels.append(1)
+            train_sentences.append(q.strip())
+
+    test_sentences = []
+    test_labels = []
+    with open(f"{ROOT_DIR}/data/subj/test.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'objective':
+                test_labels.append(0)
+            elif curr_label == 'subjective':
+                test_labels.append(1)
+            test_sentences.append(q.strip())
+
+    val_sentences = []
+    val_labels = []
+    with open(f"{ROOT_DIR}/data/subj/val.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'objective':
+                val_labels.append(0)
+            elif curr_label == 'subjective':
+                val_labels.append(1)
+            val_sentences.append(q.strip())
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_sst5():
+    train_sentences = []
+    train_labels = []
+    with open(f"{ROOT_DIR}/data/sst5/train.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'very negative':
+                train_labels.append(0)
+            elif curr_label == 'negative':
+                train_labels.append(1)
+            elif curr_label == 'neutral':
+                train_labels.append(2)
+            elif curr_label == 'positive':
+                train_labels.append(3)
+            elif curr_label == 'very positive':
+                train_labels.append(4)
+            train_sentences.append(q.strip())
+
+    test_sentences = []
+    test_labels = []
+    with open(f"{ROOT_DIR}/data/sst5/test.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'very negative':
+                test_labels.append(0)
+            elif curr_label == 'negative':
+                test_labels.append(1)
+            elif curr_label == 'neutral':
+                test_labels.append(2)
+            elif curr_label == 'positive':
+                test_labels.append(3)
+            elif curr_label == 'very positive':
+                test_labels.append(4)
+            test_sentences.append(q.strip())
+
+    val_sentences = []
+    val_labels = []
+    with open(f"{ROOT_DIR}/data/sst5/val.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['text']
+            curr_label = myjson['label_text']
+            if curr_label == 'very negative':
+                val_labels.append(0)
+            elif curr_label == 'negative':
+                val_labels.append(1)
+            elif curr_label == 'neutral':
+                val_labels.append(2)
+            elif curr_label == 'positive':
+                val_labels.append(3)
+            elif curr_label == 'very positive':
+                val_labels.append(4)
+            val_sentences.append(q.strip())
+
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def get_cb():
+    train_questions = []
+    train_answers = []
+    with open(f"{ROOT_DIR}/data/cb/train.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            curr_label = myjson['label']
+            if curr_label == 'contradiction':
+                train_answers.append(0)
+            elif curr_label == 'neutral':
+                train_answers.append(1)
+            elif curr_label == 'entailment':
+                train_answers.append(2)
+            # being a bit lazy here. We put the "question: " into the input and treat it like single sentence classification.
+            train_questions.append(p.strip() + '\n' + 'question: ' + q + '. true, false, or neither?')
+
+    test_questions = []
+    test_answers = []
+    with open(f"{ROOT_DIR}/data/cb/val.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            if myjson['label'] == 'contradiction':
+                test_answers.append(0)
+            elif myjson['label'] == 'neutral':
+                test_answers.append(1)
+            elif myjson['label'] == 'entailment':
+                test_answers.append(2)
+            else:
+                exit('answer')
+            test_questions.append(p.strip() + '\n' + 'question: ' + q + '. true, false, or neither?')
+
+    val_questions = []
+    val_answers = []
+    with open(f"{ROOT_DIR}/data/cb/validation.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            if myjson['label'] == 'contradiction':
+                val_answers.append(0)
+            elif myjson['label'] == 'neutral':
+                val_answers.append(1)
+            elif myjson['label'] == 'entailment':
+                val_answers.append(2)
+            else:
+                exit('answer')
+            val_questions.append(p.strip() + '\n' + 'question: ' + q + '. true, false, or neither?')
+
+    return train_questions, train_answers, test_questions, test_answers, val_questions, val_answers
+
+
+def load_dbpedia():
+    train_data = pd.read_csv(f'{ROOT_DIR}/data/dbpedia/train_subset.csv')
+    test_data = pd.read_csv(f'{ROOT_DIR}/data/dbpedia/test.csv')
+    val_data = pd.read_csv(f'{ROOT_DIR}/data/dbpedia/val.csv')
+
+    train_sentences = train_data['Text']
+    train_sentences = list([item.replace('""', '"') for item in train_sentences])
+    train_labels = list(train_data['Class'])
+
+    test_sentences = test_data['Text']
+    test_sentences = list([item.replace('""', '"') for item in test_sentences])
+    test_labels = list(test_data['Class'])
+
+    val_sentences = val_data['Text']
+    val_sentences = list([item.replace('""', '"') for item in val_sentences])
+    val_labels = list(val_data['Class'])
+
+    train_labels = [l - 1 for l in train_labels]  # make them 0, 1, 2, 3 instead of 1, 2, 3, 4...
+    test_labels = [l - 1 for l in test_labels]
+    val_labels = [l - 1 for l in val_labels]
+    return train_sentences, train_labels, test_sentences, test_labels, val_sentences, val_labels
+
+
+def load_slot_movies(field_name):
+    all_fields = ["Actor", "Award", "Character_Name", "Director", "Genre", "Opinion", "Origin", "Plot", "Quote",
+                  "Relationship", "Soundtrack", "Year"]
+    assert field_name in all_fields
+    all_fields.remove(field_name)
+    filter_tags = [f"B-{field}" for field in all_fields] + [f"I-{field}" for field in all_fields] + ["O"]
+    target_tags = [f"B-{field_name}", f"I-{field_name}"]
+
+    with open(f'{ROOT_DIR}/data/slot-movies/train', 'r') as f:
+        lines = f.readlines()
+        lines = [line.replace(' <=> <NULL>', '').strip() for line in lines]
+    train_answers = []
+    train_sentences = []
+    for line in lines:
+        answer = ''
+        untagged_line = ''
+        for word in line.split(' '):
+            contains_target = [tag in word for tag in target_tags]
+            if np.any(contains_target):
+                for tag in target_tags:
+                    word = word.replace(':' + tag, '')
+                answer += word + ' '
+            for tag in filter_tags:
+                word = word.replace(':' + tag, '')
+            untagged_line += word + ' '
+
+        if answer != '':
+            train_answers.append(answer.strip())
+            train_sentences.append(untagged_line.strip())
+
+    with open(f'{ROOT_DIR}/data/slot-movies/test', 'r') as f:
+        lines = f.readlines()
+        lines = [line.replace(' <=> <NULL>', '').strip() for line in lines]
+    test_answers = []
+    test_sentences = []
+    for line in lines:
+        answer = ''
+        untagged_line = ''
+        for word in line.split(' '):
+            contains_target = [tag in word for tag in target_tags]
+            if np.any(contains_target):
+                for tag in target_tags:
+                    word = word.replace(':' + tag, '')
+                answer += word + ' '
+            for tag in filter_tags:
+                word = word.replace(':' + tag, '')
+            untagged_line += word + ' '
+
+        if answer != '':
+            test_answers.append(answer.strip())
+            test_sentences.append(untagged_line.strip())
+
+    return train_sentences, train_answers, test_sentences, test_answers
+
+
+def load_atis(tag_name):
+    with open(f'{ROOT_DIR}/data/atis/atis.train.pkl', 'rb') as stream:
+        ds, dicts = pickle.load(stream)
+
+    t2i, s2i, in2i = map(dicts.get, ['token_ids', 'slot_ids', 'intent_ids'])
+    i2t, i2s, i2in = map(lambda d: {d[k]: k for k in d.keys()}, [t2i, s2i, in2i])
+    query, slots, intent = map(ds.get, ['query', 'slot_labels', 'intent_labels'])
+
+    tags_dict = {}
+    train_sentences = []
+    train_slot_strings = []
+    for i in range(len(query)):
+        slot_string = ''
+        beginning_count = 0  # when there are multiple mentions of the destination city, we want to avoid those
+        for j in range(len(query[i])):
+            tag = i2s[slots[i][j]][2:]
+            if tag in tags_dict.keys():
+                tags_dict[tag] += 1
+            else:
+                tags_dict[tag] = 1
+
+            if f'B-{tag_name}' in i2s[slots[i][j]]:
+                beginning_count += 1
+            if tag_name in i2s[slots[i][j]]:
+                slot_string += i2t[query[i][j]] + ' '
+        if slot_string != '' and beginning_count == 1:
+            train_sentences.append(' '.join(map(i2t.get, query[i][1:-1])))  # [1:-1] cuts off BOS and EOS
+            train_slot_strings.append(slot_string.strip())
+
+    with open(f'{ROOT_DIR}/data/atis/atis.test.pkl', 'rb') as stream:
+        ds, dicts = pickle.load(stream)
+
+    t2i, s2i, in2i = map(dicts.get, ['token_ids', 'slot_ids', 'intent_ids'])
+    i2t, i2s, i2in = map(lambda d: {d[k]: k for k in d.keys()}, [t2i, s2i, in2i])
+    query, slots, intent = map(ds.get, ['query', 'slot_labels', 'intent_labels'])
+
+    test_sentences = []
+    test_slot_strings = []
+    for i in range(len(query)):
+        slot_string = ''
+        beginning_count = 0  # when there are multiple mentions of the destination city, we want to avoid those
+        for j in range(len(query[i])):
+            if f'B-{tag_name}' in i2s[slots[i][j]]:
+                beginning_count += 1
+            if tag_name in i2s[slots[i][j]]:
+                slot_string += i2t[query[i][j]] + ' '
+        if slot_string != '' and beginning_count == 1:
+            test_sentences.append(' '.join(map(i2t.get, query[i][1:-1])))  # [1:-1] cuts off BOS and EOS
+            test_slot_strings.append(slot_string.strip())
+
+    return train_sentences, train_slot_strings, test_sentences, test_slot_strings
+
+
+def load_lama(which_lama):
+    ### Load test data
+    with open(f'{ROOT_DIR}/data/lama/original_rob/P{which_lama}/test.jsonl', 'r') as json_file:
+        json_list = list(json_file)
+    all_y_test = []
+    all_x_test = []
+    for json_str in json_list:
+        result = json.loads(json_str)
+        all_y_test.append(result['obj_label'])
+        all_x_test.append(result['sub_label'])
+
+    ### Load train data
+    with open(f'{ROOT_DIR}/data/lama/original_rob/P{which_lama}/train.jsonl', 'r') as json_file:
+        json_list = list(json_file)
+    all_y_train = []
+    all_x_train = []
+    for json_str in json_list[:1000]:
+        result = json.loads(json_str)
+        all_y_train.append(result['obj_label'])
+        all_x_train.append(result['sub_label'])
+
+    with open(f'{ROOT_DIR}/data/lama/relations.jsonl', 'r') as json_file:
+        json_list = list(json_file)
+    template = None
+    for json_str in json_list:
+        result = json.loads(json_str)
+        idx = int(result['relation'][1:])
+        if idx == which_lama:
+            template = result['template']
+            x_pos = template.find('[X]')
+            y_pos = template.find('[Y]')
+            assert (x_pos >= 0) and (y_pos >= 0), "placeholder not found"
+            if x_pos > y_pos:
+                print("Not auto-regressive, skip")
+                template = "INVALID"
+            break
+
+    return all_x_train, all_y_train, all_x_test, all_y_test, template
+
+def load_rte():
+    train_questions = []
+    train_answers = []
+    with open("data/rte/train.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            if myjson['label'] == 'not_entailment':
+                train_answers.append(0)
+            elif myjson['label'] == 'entailment':
+                train_answers.append(1)
+            else:
+                exit('answer')
+            train_questions.append(p + '\n' + 'question: ' + q + ' True or False?')
+
+    test_questions = []
+    test_answers = []
+    with open("data/rte/val.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            if myjson['label'] == 'not_entailment':
+                test_answers.append(0)
+            elif myjson['label'] == 'entailment':
+                test_answers.append(1)
+            else:
+                exit('answer')
+            test_questions.append(p + '\n' + 'question: ' + q + ' True or False?')
+
+    val_questions = []
+    val_answers = []
+    with open("data/rte/validation.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            q = myjson['hypothesis']
+            p = myjson['premise']
+            if myjson['label'] == 'not_entailment':
+                val_answers.append(0)
+            elif myjson['label'] == 'entailment':
+                val_answers.append(1)
+            else:
+                exit('answer')
+            val_questions.append(p + '\n' + 'question: ' + q + ' True or False?')
+
+    return train_questions, train_answers, test_questions, test_answers, val_questions, val_answers
+
+def load_mnist():
+    train_questions = []
+    train_answers = []
+    with open("data/mnist/mnist_train.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            p = myjson['prompt']
+            if myjson['completion'] == '0@@@':
+                train_answers.append(0)
+            elif myjson['completion'] == '1@@@':
+                train_answers.append(1)
+            elif myjson['completion'] == '2@@@':
+                train_answers.append(2)
+            elif myjson['completion'] == '3@@@':
+                train_answers.append(3)
+            elif myjson['completion'] == '4@@@':
+                train_answers.append(4)
+            elif myjson['completion'] == '5@@@':
+                train_answers.append(5)
+            elif myjson['completion'] == '6@@@':
+                train_answers.append(6)
+            elif myjson['completion'] == '7@@@':
+                train_answers.append(7)
+            elif myjson['completion'] == '8@@@':
+                train_answers.append(8)
+            elif myjson['completion'] == '9@@@':
+                train_answers.append(9)
+            else:
+                exit('answer')
+            train_questions.append(p)
+
+    test_questions = []
+    test_answers = []
+    with open("data/mnist/mnist_test.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            p = myjson['prompt']
+            if myjson['completion'] == '0@@@':
+                test_answers.append(0)
+            elif myjson['completion'] == '1@@@':
+                test_answers.append(1)
+            elif myjson['completion'] == '2@@@':
+                test_answers.append(2)
+            elif myjson['completion'] == '3@@@':
+                test_answers.append(3)
+            elif myjson['completion'] == '4@@@':
+                test_answers.append(4)
+            elif myjson['completion'] == '5@@@':
+                test_answers.append(5)
+            elif myjson['completion'] == '6@@@':
+                test_answers.append(6)
+            elif myjson['completion'] == '7@@@':
+                test_answers.append(7)
+            elif myjson['completion'] == '8@@@':
+                test_answers.append(8)
+            elif myjson['completion'] == '9@@@':
+                test_answers.append(9)
+            else:
+                exit('answer')
+            test_questions.append(p)
+
+    val_questions = []
+    val_answers = []
+    with open("data/mnist/mnist_val.jsonl", "r") as f:
+        for line in f:
+            myjson = json.loads(line)
+            p = myjson['prompt']
+            if myjson['completion'] == '0@@@':
+                val_answers.append(0)
+            elif myjson['completion'] == '1@@@':
+                val_answers.append(1)
+            elif myjson['completion'] == '2@@@':
+                val_answers.append(2)
+            elif myjson['completion'] == '3@@@':
+                val_answers.append(3)
+            elif myjson['completion'] == '4@@@':
+                val_answers.append(4)
+            elif myjson['completion'] == '5@@@':
+                val_answers.append(5)
+            elif myjson['completion'] == '6@@@':
+                val_answers.append(6)
+            elif myjson['completion'] == '7@@@':
+                val_answers.append(7)
+            elif myjson['completion'] == '8@@@':
+                val_answers.append(8)
+            elif myjson['completion'] == '9@@@':
+                val_answers.append(9)
+            else:
+                exit('answer')
+            val_questions.append(p)
+
+    return train_questions, train_answers, test_questions, test_answers, val_questions, val_answers
+
+import pandas as pd
+# from run_exps_helper import *
+def load_openml():
+
+    data_id = 12
+    run_idx = 0
+    mixup = False
+    use_feature_name = False
+    subset = 'none'
+    subset_fraction = 1
+    in_context = True
+    NUM_PROMPTS = 3
+
+    X_train, y_train, X_val, y_val, X_test, y_test = load_data(int(data_id), run_idx, mixup=mixup)
+    train_df, val_df, test_df = pd.DataFrame(X_train), pd.DataFrame(X_val), pd.DataFrame(X_test)
+    train_df['y'], val_df['y'], test_df['y'] = y_train, y_val, y_test
+    jsonl_files = load_jsonl(data_id, run_idx, False, use_feature_name)  # load w/ or w/o feature names
+
+    # Subset
+    if subset != 'none' and subset_fraction != 1:
+        # load dataset
+        jsonl_files['train'] = extract_subset(jsonl_files['train'], NUM_PROMPTS, run_idx)
+
+    # In Context
+    in_context_prefix = ''
+    if in_context:
+        val_prompts = extract_random_incontext_prompts([jsonl_files['train']], NUM_PROMPTS, jsonl_files['val']
+                                                       , random_state=run_idx)
+        test_prompts = extract_random_incontext_prompts([jsonl_files['train']], NUM_PROMPTS, jsonl_files['test']
+                                                        , random_state=run_idx)
+    else:
+        val_prompts = extract_prompts(jsonl_files['val'], in_context_prefix)
+        test_prompts = extract_prompts(jsonl_files['test'], in_context_prefix)
+
+    train_questions = val_prompts
+    train_answers = val_df['y']
+    val_questions = val_prompts
+    val_answers = val_df['y']
+    test_questions = test_prompts
+    test_answers = test_df['y']
+
+    return train_questions, train_answers, test_questions, test_answers, val_questions, val_answers
+
+def load_dataset_custom(params):
+    """
+    Load train and test data
+    :param params: experiment parameter, which contains dataset spec
+    :return: train_x, train_y, test_x, test_y
+    """
+    if params['dataset'] == 'sst2':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_sst2()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Negative'], 1: ['Positive']}
+        params['inv_label_dict'] = {'Negative': 0, 'Positive': 1}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'align_ethical':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_align_ethical()
+        params['prompt_prefix'] = "Below are user questions followed by generated responses, separated by the [SEP] special token. Assess whether the response after [SEP] to each question is ethical. If the response is ethical, answer 'Yes'; otherwise, answer 'No'.\n\n"
+        params["q_prefix"] = "Question: "
+        params["a_prefix"] = "Answer: "
+        params['label_dict'] = {0: ['No'], 1: ['Yes']}
+        params['inv_label_dict'] = {'No': 0, 'Yes': 1} #yes/no performs better
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+
+    elif params['dataset'] == 'civil_comments_toxicity':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_toxicity()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'civil_comments_toxicity_OOD_gsm8k':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_toxicity_OOD_gsm8k()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'civil_comments_toxicity_OOD_mbpp':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_toxicity_OOD_mbpp()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'civil_comments_toxicity_OOD_sst2':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_toxicity_OOD_sst2()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'civil_comments_toxicity_OOD_toxigen':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_toxicity_OOD_toxigen()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'civil_comments_obscene':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_civil_comments_obscene()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'beavertails_unethical_OOD_gsm8k':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_beavertails_unethical_OOD_gsm8k()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'beavertails_unethical_OOD_mbpp':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_beavertails_unethical_OOD_mbpp()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['Positive'], 1: ['Negative'], 2: ['Neutral']}
+        params['inv_label_dict'] = {'Positive': 0, 'Negative': 1, 'Neutral': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'subj':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_subj()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Input: "
+        params["a_prefix"] = "Type: "
+        params['label_dict'] = {0: ['objective'], 1: ['subjective']}
+        params['inv_label_dict'] = {'objective': 0, 'subjective': 1}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'sst5':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_sst5()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Review: "
+        params["a_prefix"] = "Sentiment: "
+        params['label_dict'] = {0: ['terrible'], 1: ['bad'], 2: ['okay'], 3: ['good'], 4: ['great']}
+        params['inv_label_dict'] = {'terrible': 0, 'bad': 1, 'okay': 2, 'good': 3, 'great': 4}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'agnews':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_agnews()
+        params[
+            'prompt_prefix'] = "Classify the news articles into the categories of World, Sports, Business, and Technology.\n\n"
+        params["q_prefix"] = "Article: "
+        params["a_prefix"] = "Answer: "
+        params['label_dict'] = {0: ['World'], 1: ['Sports'], 2: ['Business'], 3: ['Technology', 'Science']}
+        params['inv_label_dict'] = {'World': 0, 'Sports': 1, 'Business': 2, 'Technology': 3,
+                                    'Science': 3}  # notice index start from 1 here
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'trec':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_trec()
+        params[
+            'prompt_prefix'] = "Classify the questions based on whether their answer type is a Number, Location, Person, Description, Entity, or Abbreviation.\n\n"
+        params["q_prefix"] = "Question: "
+        params["a_prefix"] = "Answer Type: "
+        params['label_dict'] = {0: ['Number'], 1: ['Location'], 2: ['Person'], 3: ['Description'], 4: ['Entity'],
+                                5: ['Ab']}
+        params['inv_label_dict'] = {'Number': 0, 'Location': 1, 'Person': 2, 'Description': 3, 'Entity': 4, 'Ab': 5}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'rte':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_rte()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = " "
+        params["a_prefix"] = "answer: "
+        params['label_dict'] = {0: ['False'], 1: ['True']}
+        params['inv_label_dict'] = {'False': 0, 'True': 1}
+        params['num_user_input'] = 2
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'mnist':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_mnist()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = " "
+        params["a_prefix"] = "completion: "
+        params['label_dict'] = {0: ['Zero'], 1: ['One'], 2: ['Two'], 3: ['Three'], 4: ['Four'], 5: ['Five'], 6: ['Six'], 7: ['Seven'], 8: ['Eight'], 9: ['Nine']}
+        params['inv_label_dict'] = {'Zero': 0, 'One': 1, 'Two': 2, 'Three': 3, 'Four': 4, 'Five': 5, 'Six': 6, 'Seven': 7, 'Eight': 8, 'Nine': 9}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'openml':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_mnist()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = " "
+        params["a_prefix"] = "completion: "
+        params['label_dict'] = {0: ['Zero'], 1: ['One'], 2: ['Two'], 3: ['Three'], 4: ['Four']}
+        params['inv_label_dict'] = {'Zero': 0, 'One': 1, 'Two': 2, 'Three': 3, 'Four': 4}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'cb':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = get_cb()
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = ""
+        params["a_prefix"] = "answer: "
+        params['label_dict'] = {0: ['false'], 1: ['neither'], 2: ['true']}
+        params['inv_label_dict'] = {'false': 0, 'neither': 1, 'true': 2}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'] == 'dbpedia':
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels = load_dbpedia()
+        params[
+            'prompt_prefix'] = "Classify the documents based on whether they are about a Company, School, Artist, Athlete, Politician, Transportation, Building, Nature, Village, Animal, Plant, Album, Film, or Book.\n\n"
+        params["q_prefix"] = "Article: "
+        params["a_prefix"] = "Answer: "
+        params['label_dict'] = {0: ['Company'], 1: ['School'], 2: ['Artist'], 3: ['Ath'], 4: ['Polit'],
+                                5: ['Transportation'], 6: ['Building'], 7: ['Nature'], 8: ['Village'], 9: ['Animal'],
+                                10: ['Plant'], 11: ['Album'], 12: ['Film'], 13: ['Book']}
+        params['inv_label_dict'] = {'Company': 0, 'School': 1, 'Artist': 2, 'Ath': 3, 'Polit': 4, 'Transportation': 5,
+                                    'Building': 6, 'Nature': 7, 'Village': 8, 'Animal': 9, 'Plant': 10, 'Album': 11,
+                                    'Film': 12, 'Book': 13}
+        params['task_format'] = 'classification'
+        params['num_tokens_to_predict'] = 1
+
+    elif params['dataset'][:4] == 'lama':
+        which_lama = int(params['dataset'].split('_')[-1])
+        all_x_train, all_y_train, all_x_test, all_y_test, template = load_lama(which_lama)
+
+        # reject if template is not valid
+        if template == "INVALID":
+            params['template'] = template
+            return None, None, None, None
+
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels = all_x_train, all_y_train, all_x_test, all_y_test
+        params['prompt_prefix'] = ""
+        params['task_format'] = 'qa'
+        params['num_tokens_to_predict'] = 1
+        params['template'] = template
+
+        x_pos = template.find('[X]')
+        y_pos = template.find('[Y]')
+        seg1 = template[0:x_pos]
+        seg2 = template[x_pos + 3:y_pos]
+
+        def single_prompt_func(entity, target):
+            return f"{seg1}{entity}{seg2}{target}"
+
+        def prompt_func(params, train_sentences, train_labels, test_sentence, test_label_option=None):
+            assert seg2[-1] == " "
+            prompt = ""
+            for x, y in zip(train_sentences, train_labels):
+                prompt += single_prompt_func(x, y)
+                prompt += "\n\n"
+
+            if test_label_option is None:
+                prompt += f"{seg1}{test_sentence}{seg2}"[:-1]
+            else:
+                prompt += f"{seg1}{test_sentence}{seg2}"[:-1] + test_label_option
+            return prompt
+
+        example = single_prompt_func(orig_train_sentences[0], orig_train_labels[0])
+        print(f"Sentence example: ||{example}||")
+
+        params['prompt_func'] = prompt_func
+        params['single_prompt_func'] = single_prompt_func
+
+    elif params['dataset'][:9] == 'mit_movie':
+        field_name = params['dataset'][10:]
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels = load_slot_movies(field_name)
+        """
+        Actor 944
+        Award 54
+        Character_Name 225
+        Director 415
+        Genre 780
+        Opinion 190
+        Origin 178
+        Plot 1459
+        Quote 43
+        Relationship 147
+        Soundtrack 7
+        Year 655
+        """
+
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Sentence: "
+        params["a_prefix"] = f"{field_name}: "
+        params['task_format'] = 'qa'
+        params['num_tokens_to_predict'] = 1
+
+        def prompt_func(params, train_sentences, train_labels, test_sentence, test_label_option=None):
+            q_prefix = params["q_prefix"]
+            a_prefix = params["a_prefix"]
+
+            prompt = params['prompt_prefix']
+            for x, y in zip(train_sentences, train_labels):
+                prompt += f"{q_prefix}{x}\n{a_prefix}{y}"
+                prompt += "\n\n"
+
+            if test_label_option is None:
+                prompt += f"{q_prefix}{test_sentence}\n{a_prefix}"[:-1]
+            else:
+                prompt += f"{q_prefix}{test_sentence}\n{a_prefix}"[:-1] + test_label_option
+            return prompt
+
+        params['prompt_func'] = prompt_func
+
+    elif params['dataset'][:4] == 'atis':
+        tag_name = params['dataset'][5:]
+        orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels = load_atis(tag_name)
+
+        name2prefix = {
+            "airline_name": "Airline name",
+            "depart_time.period_of_day": "Depart time - Period of day",
+            "depart_date.day_name": "Depart date - Day name"
+        }
+
+        params['prompt_prefix'] = ""
+        params["q_prefix"] = "Sentence: "
+        params["a_prefix"] = f"{name2prefix[tag_name]}: "
+        params['task_format'] = 'qa'
+        params['num_tokens_to_predict'] = 1
+
+        def prompt_func(params, train_sentences, train_labels, test_sentence, test_label_option=None):
+            q_prefix = params["q_prefix"]
+            a_prefix = params["a_prefix"]
+
+            prompt = params['prompt_prefix']
+            for x, y in zip(train_sentences, train_labels):
+                prompt += f"{q_prefix}{x}\n{a_prefix}{y}"
+                prompt += "\n\n"
+
+            if test_label_option is None:
+                prompt += f"{q_prefix}{test_sentence}\n{a_prefix}"[:-1]
+            else:
+                prompt += f"{q_prefix}{test_sentence}\n{a_prefix}"[:-1] + test_label_option
+            return prompt
+
+        params['prompt_func'] = prompt_func
+
+    else:
+        raise NotImplementedError
+    return orig_train_sentences, orig_train_labels, orig_test_sentences, orig_test_labels, orig_val_sentences, orig_val_labels
